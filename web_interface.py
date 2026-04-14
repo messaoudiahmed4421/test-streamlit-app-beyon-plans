@@ -13,7 +13,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from pipeline_runner import run_pipeline
 from pipeline_runner_adk import run_pipeline_adk
 from pipeline_runner_gemini import run_pipeline_gemini
 
@@ -84,80 +83,6 @@ def init_state() -> None:
         st.session_state.operational_logs = STATIC_LOGS.copy()
 
 
-def run_pipeline_placeholder(query: str, uploaded_files: list) -> dict:
-    """
-    Placeholder to keep UI deployable now.
-    Replace this function by your real pipeline call from colab x vscode.
-    """
-    names = [file.name for file in uploaded_files]
-    st.session_state.pipeline_status = "running"
-
-    kpis = pd.DataFrame(
-        {
-            "Metric": ["Anomalies", "Score A5", "Coverage", "Critical"],
-            "Value": [17, 7.2, 0.86, 5],
-        }
-    )
-
-    trend = pd.DataFrame(
-        {
-            "Period": ["Q1", "Q2", "Q3", "Q4"],
-            "Budget": [100, 110, 120, 130],
-            "Actual": [103, 118, 109, 149],
-        }
-    )
-    trend["Variance"] = trend["Actual"] - trend["Budget"]
-
-    fig_var = go.Figure()
-    fig_var.add_trace(
-        go.Bar(
-            x=trend["Period"],
-            y=trend["Variance"],
-            marker_color=["#0f766e" if x >= 0 else "#dc2626" for x in trend["Variance"]],
-            name="Variance",
-        )
-    )
-    fig_var.update_layout(
-        title="Budget vs Actual Variance",
-        yaxis_title="Variance",
-        template="plotly_dark",
-        height=320,
-        margin=dict(l=20, r=20, t=45, b=20),
-    )
-
-    fig_mix = px.pie(
-        names=["Critique", "Majeur", "Mineur"],
-        values=[5, 8, 4],
-        title="Repartition des anomalies",
-        color_discrete_sequence=["#dc2626", "#f59e0b", "#22c55e"],
-        hole=0.45,
-    )
-    fig_mix.update_layout(
-        height=320,
-        margin=dict(l=20, r=20, t=45, b=20),
-        paper_bgcolor="#0b1220",
-        font_color="#f8fafc",
-    )
-
-    report = (
-        f"Run termine pour la requete: '{query}'\n\n"
-        f"Fichiers charges: {', '.join(names) if names else 'aucun'}\n"
-        "- 17 anomalies detectees, 10 retenues\n"
-        "- Score A5: 7.2/10\n"
-        "- Priorite: investiguer les ecarts Q4 et les couts operationnels"
-    )
-
-    st.session_state.pipeline_status = "done"
-    return {
-        "report": report,
-        "kpis": kpis,
-        "figures": [fig_var, fig_mix],
-        "agents": AGENTS_DATA.copy(),
-        "quality": QUALITY_DATA.copy(),
-        "logs": STATIC_LOGS.copy(),
-    }
-
-
 def _resolve_google_api_key() -> str | None:
     """Resolve API key from Streamlit secrets first, then environment."""
     try:
@@ -169,31 +94,29 @@ def _resolve_google_api_key() -> str | None:
 
 
 def execute_pipeline(query: str, uploaded_files: list) -> dict:
-    """Run ADK A1-A5 pipeline first, then Gemini, then deterministic fallback."""
+    """Run multi-agent execution only: ADK first, Gemini as fallback."""
+    key = _resolve_google_api_key()
+    if not key:
+        raise RuntimeError("GOOGLE_API_KEY is missing. Multi-agent execution requires a valid API key.")
+
     try:
-        key = _resolve_google_api_key()
-        if key:
-            try:
-                return run_pipeline_adk(
-                    query=query,
-                    uploaded_files=uploaded_files,
-                    api_key=key,
-                )
-            except Exception:
-                return run_pipeline_gemini(
-                    query=query,
-                    uploaded_files=uploaded_files,
-                    api_key=key,
-                )
-        return run_pipeline(query=query, uploaded_files=uploaded_files)
-    except Exception as exc:
-        fallback = run_pipeline_placeholder(query, uploaded_files)
-        fallback["report"] = (
-            fallback["report"]
-            + "\n\n"
-            + f"[Fallback mode enabled due to runtime issue: {exc}]"
+        return run_pipeline_adk(
+            query=query,
+            uploaded_files=uploaded_files,
+            api_key=key,
         )
-        return fallback
+    except Exception as adk_exc:
+        try:
+            return run_pipeline_gemini(
+                query=query,
+                uploaded_files=uploaded_files,
+                api_key=key,
+            )
+        except Exception as gemini_exc:
+            raise RuntimeError(
+                "Multi-agent execution failed in both ADK and Gemini paths. "
+                f"ADK error: {adk_exc} | Gemini error: {gemini_exc}"
+            ) from gemini_exc
 
 
 def export_report_bytes(report_text: str) -> bytes:
@@ -320,8 +243,18 @@ if page == "Executive Workspace":
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            with st.spinner("Running financial analysis pipeline..."):
-                result = execute_pipeline(prompt, uploaded_files or [])
+            st.session_state.pipeline_status = "running"
+            try:
+                with st.spinner("Running financial analysis pipeline..."):
+                    result = execute_pipeline(prompt, uploaded_files or [])
+            except Exception as exc:
+                st.session_state.pipeline_status = "error"
+                st.error(f"Pipeline execution failed: {exc}")
+                assistant_msg = "Pipeline execution failed. Please verify API key and backend dependencies."
+                st.session_state.chat_history.append({"role": "assistant", "content": assistant_msg})
+                with st.chat_message("assistant"):
+                    st.markdown(assistant_msg)
+                st.stop()
 
             st.session_state.last_report = result["report"]
             st.session_state.last_figures = result["figures"]
@@ -331,6 +264,7 @@ if page == "Executive Workspace":
             st.session_state.operational_logs = result.get("logs", STATIC_LOGS.copy())
             run_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             st.session_state.last_run_time = run_time
+            st.session_state.pipeline_status = "done"
             st.session_state.run_history.append(
                 {
                     "time": run_time,
