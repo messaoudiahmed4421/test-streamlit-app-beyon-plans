@@ -6,21 +6,25 @@ Run with: streamlit run web_interface.py
 
 from datetime import datetime
 from io import BytesIO
+import os
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from pipeline_runner import run_pipeline
+from pipeline_runner_gemini import run_pipeline_gemini
+
 
 APP_VERSION = "2.0-chat-workspace"
 
 NAV_ITEMS = [
-    "Workspace Chat",
-    "Dashboard",
-    "Dernieres Runs",
-    "Performance",
-    "Logs",
+    "Executive Workspace",
+    "Executive Dashboard",
+    "Run History",
+    "Performance Insights",
+    "Operational Logs",
 ]
 
 AGENTS_DATA = pd.DataFrame(
@@ -71,6 +75,12 @@ def init_state() -> None:
         st.session_state.pipeline_status = "idle"
     if "run_history" not in st.session_state:
         st.session_state.run_history = []
+    if "agent_metrics" not in st.session_state:
+        st.session_state.agent_metrics = AGENTS_DATA.copy()
+    if "quality_metrics" not in st.session_state:
+        st.session_state.quality_metrics = QUALITY_DATA.copy()
+    if "operational_logs" not in st.session_state:
+        st.session_state.operational_logs = STATIC_LOGS.copy()
 
 
 def run_pipeline_placeholder(query: str, uploaded_files: list) -> dict:
@@ -141,7 +151,41 @@ def run_pipeline_placeholder(query: str, uploaded_files: list) -> dict:
         "report": report,
         "kpis": kpis,
         "figures": [fig_var, fig_mix],
+        "agents": AGENTS_DATA.copy(),
+        "quality": QUALITY_DATA.copy(),
+        "logs": STATIC_LOGS.copy(),
     }
+
+
+def _resolve_google_api_key() -> str | None:
+    """Resolve API key from Streamlit secrets first, then environment."""
+    try:
+        if "GOOGLE_API_KEY" in st.secrets:
+            return str(st.secrets["GOOGLE_API_KEY"])
+    except Exception:
+        pass
+    return os.getenv("GOOGLE_API_KEY")
+
+
+def execute_pipeline(query: str, uploaded_files: list) -> dict:
+    """Run Gemini-backed A1-A5 pipeline and gracefully fall back if needed."""
+    try:
+        key = _resolve_google_api_key()
+        if key:
+            return run_pipeline_gemini(
+                query=query,
+                uploaded_files=uploaded_files,
+                api_key=key,
+            )
+        return run_pipeline(query=query, uploaded_files=uploaded_files)
+    except Exception as exc:
+        fallback = run_pipeline_placeholder(query, uploaded_files)
+        fallback["report"] = (
+            fallback["report"]
+            + "\n\n"
+            + f"[Fallback mode enabled due to runtime issue: {exc}]"
+        )
+        return fallback
 
 
 def export_report_bytes(report_text: str) -> bytes:
@@ -151,7 +195,7 @@ def export_report_bytes(report_text: str) -> bytes:
 
 
 st.set_page_config(
-    page_title="P&L Chat Pipeline",
+    page_title="Enterprise Financial Performance Platform",
     page_icon="PL",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -228,8 +272,8 @@ h1, h2, h3 {
     unsafe_allow_html=True,
 )
 
-st.title("P&L Pipeline Workspace")
-st.caption("Interface chat + upload + rapport + graphes, prete pour branchement pipeline reel.")
+st.title("Enterprise Financial Performance Platform")
+st.caption("Professional workspace for financial analysis, anomaly intelligence, and executive decision support.")
 
 with st.sidebar:
     page = st.radio("Navigation", NAV_ITEMS, index=0)
@@ -251,29 +295,32 @@ with st.sidebar:
     if st.session_state.last_run_time:
         st.caption(f"Dernier run: {st.session_state.last_run_time}")
 
-if page == "Workspace Chat":
+if page == "Executive Workspace":
     main_left, main_right = st.columns([1.15, 1], gap="large")
 
     with main_left:
-        st.markdown('<div class="panel-title">Conversation & Requetes</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-title">Conversation & Strategic Requests</div>', unsafe_allow_html=True)
         with st.container(border=True, height=530):
             for msg in st.session_state.chat_history:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
 
-        prompt = st.chat_input("Ecrire une requete pipeline (ex: Analyse les variances Q4 et propose plan d'action).")
+        prompt = st.chat_input("Enter a strategic request (e.g., analyze Q4 variances and propose an action plan).")
 
         if prompt:
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            with st.spinner("Execution du pipeline..."):
-                result = run_pipeline_placeholder(prompt, uploaded_files or [])
+            with st.spinner("Running financial analysis pipeline..."):
+                result = execute_pipeline(prompt, uploaded_files or [])
 
             st.session_state.last_report = result["report"]
             st.session_state.last_figures = result["figures"]
             st.session_state.last_kpis = result["kpis"]
+            st.session_state.agent_metrics = result.get("agents", AGENTS_DATA.copy())
+            st.session_state.quality_metrics = result.get("quality", QUALITY_DATA.copy())
+            st.session_state.operational_logs = result.get("logs", STATIC_LOGS.copy())
             run_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             st.session_state.last_run_time = run_time
             st.session_state.run_history.append(
@@ -285,23 +332,23 @@ if page == "Workspace Chat":
                 }
             )
 
-            assistant_msg = "Pipeline execute. Rapport et graphes mis a jour."
+            assistant_msg = "Pipeline execution completed. Report and charts have been updated."
             st.session_state.chat_history.append({"role": "assistant", "content": assistant_msg})
             with st.chat_message("assistant"):
                 st.markdown(assistant_msg)
 
     with main_right:
-        st.markdown('<div class="panel-title">Rapport</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-title">Executive Report</div>', unsafe_allow_html=True)
         with st.container(border=True, height=250):
             st.text_area(
-                "Rapport genere",
+                "Generated report",
                 value=st.session_state.last_report,
                 height=190,
                 label_visibility="collapsed",
             )
 
         st.download_button(
-            "Telecharger le rapport (.txt)",
+            "Download report (.txt)",
             data=export_report_bytes(st.session_state.last_report),
             file_name="pipeline_report.txt",
             mime="text/plain",
@@ -309,7 +356,7 @@ if page == "Workspace Chat":
         )
 
         st.markdown("\n")
-        st.markdown('<div class="panel-title">Graphes</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-title">Charts</div>', unsafe_allow_html=True)
         with st.container(border=True):
             if "last_kpis" in st.session_state:
                 kpi_cols = st.columns(4)
@@ -320,62 +367,64 @@ if page == "Workspace Chat":
                 for fig in st.session_state.last_figures:
                     st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("Les graphes apparaitront ici apres le premier run.")
+                st.info("Charts will appear here after the first run.")
 
-elif page == "Dashboard":
-    st.subheader("Vue Performance Pipeline")
+elif page == "Executive Dashboard":
+    st.subheader("Pipeline Performance Overview")
+    dashboard_agents = st.session_state.get("agent_metrics", AGENTS_DATA)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Runs", str(len(st.session_state.run_history)))
     c2.metric("Score A5", "7.2 / 10")
     c3.metric("Anomalies", "17")
-    c4.metric("Etat", st.session_state.pipeline_status)
+    c4.metric("Status", st.session_state.pipeline_status)
 
     d1, d2 = st.columns(2)
     with d1:
         fig_success = px.bar(
-            AGENTS_DATA,
+            dashboard_agents,
             x="Agent",
             y="Succes",
             color="Statut",
-            title="Succes par agent",
+            title="Agent Success Rate",
             color_discrete_map={"OK": "#16a34a", "ERROR": "#dc2626", "WAITING": "#f59e0b"},
         )
         st.plotly_chart(fig_success, use_container_width=True)
     with d2:
-        fig_duration = px.line(AGENTS_DATA, x="Agent", y="Duree_s", markers=True, title="Duree moyenne (s)")
+        fig_duration = px.line(dashboard_agents, x="Agent", y="Duree_s", markers=True, title="Average Duration (s)")
         st.plotly_chart(fig_duration, use_container_width=True)
 
-elif page == "Dernieres Runs":
-    st.subheader("Historique des derniers runs")
+elif page == "Run History":
+    st.subheader("Recent Execution History")
     if st.session_state.run_history:
         history_df = pd.DataFrame(st.session_state.run_history)
         st.dataframe(history_df, use_container_width=True, hide_index=True)
     else:
-        st.info("Aucun run execute pour le moment.")
+        st.info("No run has been executed yet.")
 
-    st.markdown("### Dernier rapport")
+    st.markdown("### Latest report")
     st.code(st.session_state.last_report)
 
-elif page == "Performance":
-    st.subheader("Tendances de performance et qualite")
+elif page == "Performance Insights":
+    st.subheader("Performance and Quality Trends")
+    quality_metrics = st.session_state.get("quality_metrics", QUALITY_DATA)
     p1, p2 = st.columns(2)
     with p1:
         fig_trend = px.line(
-            QUALITY_DATA,
+            quality_metrics,
             x="Date",
             y="Score Global",
             markers=True,
-            title="Evolution Score Global",
+            title="Global Score Trend",
         )
         st.plotly_chart(fig_trend, use_container_width=True)
     with p2:
-        fig_action = px.bar(QUALITY_DATA, x="Date", y="Actionnabilite", title="Actionnabilite")
+        fig_action = px.bar(quality_metrics, x="Date", y="Actionnabilite", title="Actionability")
         st.plotly_chart(fig_action, use_container_width=True)
 
-elif page == "Logs":
-    st.subheader("Logs importants")
-    logs_df = pd.DataFrame(STATIC_LOGS, columns=["Time", "Agent", "Status", "Message"])
+elif page == "Operational Logs":
+    st.subheader("Key Operational Logs")
+    logs_df = pd.DataFrame(st.session_state.get("operational_logs", STATIC_LOGS), columns=["Time", "Agent", "Status", "Message"])
     st.dataframe(logs_df, use_container_width=True, hide_index=True)
 
 st.markdown("---")
-st.caption(f"P&L Chat Pipeline v{APP_VERSION} | {datetime.now().strftime('%Y-%m-%d')}")
+st.caption(f"Enterprise Financial Performance Platform v{APP_VERSION} | {datetime.now().strftime('%Y-%m-%d')}")
