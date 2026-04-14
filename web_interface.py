@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from pipeline_runner import run_pipeline
+from pipeline_runner_adk import run_pipeline_adk
 from pipeline_runner_gemini import run_pipeline_gemini
 
 
@@ -168,15 +169,22 @@ def _resolve_google_api_key() -> str | None:
 
 
 def execute_pipeline(query: str, uploaded_files: list) -> dict:
-    """Run Gemini-backed A1-A5 pipeline and gracefully fall back if needed."""
+    """Run ADK A1-A5 pipeline first, then Gemini, then deterministic fallback."""
     try:
         key = _resolve_google_api_key()
         if key:
-            return run_pipeline_gemini(
-                query=query,
-                uploaded_files=uploaded_files,
-                api_key=key,
-            )
+            try:
+                return run_pipeline_adk(
+                    query=query,
+                    uploaded_files=uploaded_files,
+                    api_key=key,
+                )
+            except Exception:
+                return run_pipeline_gemini(
+                    query=query,
+                    uploaded_files=uploaded_files,
+                    api_key=key,
+                )
         return run_pipeline(query=query, uploaded_files=uploaded_files)
     except Exception as exc:
         fallback = run_pipeline_placeholder(query, uploaded_files)
