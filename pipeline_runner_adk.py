@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from pipeline_instructions import AGENT_INSTRUCTIONS
 from pipeline_runner import run_pipeline
 
 
@@ -65,13 +66,16 @@ def run_pipeline_adk(
         from google.adk.agents import LlmAgent, SequentialAgent
         from google.adk.runners import Runner
         from google.adk.sessions import InMemorySessionService
+        from google.adk.tools import google_search
     except Exception as exc:
         raise RuntimeError("google-adk or google-genai dependency is missing.") from exc
 
     start_total = perf_counter()
 
-    # Baseline deterministic calculations from local backend.
+    # Baseline deterministic calculations (numerical backbone) + charts.
     base_result = run_pipeline(query=query, uploaded_files=uploaded_files)
+
+    instructions = AGENT_INSTRUCTIONS
 
     kpis_df = base_result.get("kpis", pd.DataFrame())
     kpi_map: dict[str, Any] = {}
@@ -87,61 +91,95 @@ def run_pipeline_adk(
         f"Baseline report:\n{base_result.get('report', '')[:6000]}\n"
     )
 
-    # A1..A5 as ADK agents.
+    # A1..A3 as notebook-aligned ADK agents.
     a1 = LlmAgent(
         name="A1_Normalization",
         model=model_name,
-        instruction=(
-            "Validate structural quality of provided financial context. "
-            "Output concise bullet points for checks, risks, and confidence."
-        ),
+        instruction=instructions["A1_INSTRUCTION"],
         output_key="a1_output",
     )
 
     a2 = LlmAgent(
         name="A2_Classification",
         model=model_name,
-        instruction=(
-            "Classify financial themes and account clusters from context and A1 output. "
-            "Prioritize material categories and signal quality of mapping."
-        ),
+        instruction=instructions["A2_INSTRUCTION"],
         output_key="a2_output",
     )
 
     a3 = LlmAgent(
         name="A3_Variance_Engine",
         model=model_name,
-        instruction=(
-            "Analyze anomaly hypotheses using context and A2 output. "
-            "Return top priorities with expected business impact and immediate actions."
-        ),
+        instruction=instructions["A3_INSTRUCTION"],
         output_key="a3_output",
     )
 
-    a4 = LlmAgent(
-        name="A4_Strategic_Reporter",
+    def load_analysis_results(tool_context):
+        briefing = {
+            "status": "success",
+            "message": "Briefing package generated from deterministic backend outputs.",
+            "query": query,
+            "files": [f.name for f in uploaded_files],
+            "baseline_report": base_result.get("report", ""),
+            "kpis": kpi_map,
+            "performance_globale": {
+                "total_budget": float(kpi_map.get("Coverage", 0)) if isinstance(kpi_map.get("Coverage"), (int, float)) else 0,
+                "total_actual": 0,
+                "ecart_global": 0,
+                "ecart_pct": 0,
+            },
+            "triage_stats": {
+                "retained": int(kpi_map.get("Critical", 0)) if isinstance(kpi_map.get("Critical"), (int, float)) else 0,
+                "total_scored": int(kpi_map.get("Anomalies", 0)) if isinstance(kpi_map.get("Anomalies"), (int, float)) else 0,
+            },
+        }
+        tool_context.state["a4_briefing"] = briefing
+        return briefing
+
+    a4_data_loader = LlmAgent(
+        name="A4_Data_Loader",
         model=model_name,
-        instruction=(
-            "Write an executive markdown report with sections: Executive Summary, "
-            "Performance, Key Anomalies, Recommended Actions. Use concise business language."
-        ),
+        instruction=instructions["A4_LOADER_INSTRUCTION"],
+        tools=[load_analysis_results],
+        output_key="a4_loader_summary",
+    )
+
+    a4_report_writer = LlmAgent(
+        name="A4_Report_Writer",
+        model=model_name,
+        instruction=instructions["A4_REPORT_INSTRUCTION"],
+        tools=[google_search],
         output_key="a4_report",
     )
+
+    a4_strategic_reporter = SequentialAgent(
+        name="A4_Strategic_Reporter",
+        description="A4 sequential reporter with loader + report writer.",
+        sub_agents=[a4_data_loader, a4_report_writer],
+    )
+
+    def load_report_for_judging(tool_context):
+        report = tool_context.state.get("a4_report", "")
+        briefing = tool_context.state.get("a4_briefing", {})
+        payload = {
+            "status": "success",
+            "rapport_markdown": report,
+            "reference": briefing,
+        }
+        tool_context.state["a5_judging_package"] = payload
+        return payload
 
     a5 = LlmAgent(
         name="A5_Quality_Judge",
         model=model_name,
-        instruction=(
-            "Evaluate the A4 report from 1 to 10 and explain strengths, weaknesses, and improvements. "
-            "First line must contain 'Score Global: <number>/10'."
-        ),
+        instruction=instructions["A5_INSTRUCTION"],
+        tools=[load_report_for_judging],
         output_key="a5_judgment",
     )
 
     pipeline = SequentialAgent(
-        name="PnL_ADK_Pipeline",
-        description="A1->A5 ADK orchestration for financial analysis.",
-        sub_agents=[a1, a2, a3, a4, a5],
+        name="PnL_Analysis_Pipeline",
+        description="Notebook-aligned A1->A5 ADK orchestration for financial analysis.",
+        sub_agents=[a1, a2, a3, a4_strategic_reporter, a5],
     )
 
     session_service = InMemorySessionService()
@@ -164,8 +202,14 @@ def run_pipeline_adk(
             outputs_by_agent[author] = text
             log_rows.append((pd.Timestamp.now().strftime("%H:%M:%S"), author, "SUCCESS", "Response generated"))
 
-    a4_report = outputs_by_agent.get("A4_Strategic_Reporter", "")
+    # Read final state for notebook-aligned output keys.
+    latest_session = _ensure_session(session_service, app_name, user_id, session_id)
+    state = getattr(latest_session, "state", {}) or {}
+
+    a4_report = str(state.get("a4_report", "") or outputs_by_agent.get("A4_Report_Writer", "") or outputs_by_agent.get("A4_Strategic_Reporter", ""))
     a5_judgment = outputs_by_agent.get("A5_Quality_Judge", "")
+    if not a5_judgment:
+        a5_judgment = str(state.get("a5_judgment", ""))
 
     quality_score = 7.0
     for line in a5_judgment.splitlines():
