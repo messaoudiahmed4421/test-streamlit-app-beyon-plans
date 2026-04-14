@@ -14,7 +14,6 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from pipeline_runner_adk import run_pipeline_adk
-from pipeline_runner_gemini import run_pipeline_gemini
 
 
 APP_VERSION = "2.0-chat-workspace"
@@ -94,29 +93,16 @@ def _resolve_google_api_key() -> str | None:
 
 
 def execute_pipeline(query: str, uploaded_files: list) -> dict:
-    """Run multi-agent execution only: ADK first, Gemini as fallback."""
+    """Run multi-agent execution only via ADK pipeline."""
     key = _resolve_google_api_key()
     if not key:
         raise RuntimeError("GOOGLE_API_KEY is missing. Multi-agent execution requires a valid API key.")
 
-    try:
-        return run_pipeline_adk(
-            query=query,
-            uploaded_files=uploaded_files,
-            api_key=key,
-        )
-    except Exception as adk_exc:
-        try:
-            return run_pipeline_gemini(
-                query=query,
-                uploaded_files=uploaded_files,
-                api_key=key,
-            )
-        except Exception as gemini_exc:
-            raise RuntimeError(
-                "Multi-agent execution failed in both ADK and Gemini paths. "
-                f"ADK error: {adk_exc} | Gemini error: {gemini_exc}"
-            ) from gemini_exc
+    return run_pipeline_adk(
+        query=query,
+        uploaded_files=uploaded_files,
+        api_key=key,
+    )
 
 
 def export_report_bytes(report_text: str) -> bytes:
